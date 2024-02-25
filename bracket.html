@@ -1,0 +1,1484 @@
+<html>
+<script type="text/javascript">
+// Javascript library for filling in a 64-team tournament bracket.
+//
+// Written by newtypezaku (newtypezaku.tumblr.com) for my anime bracket, so
+// it's customized for that. It's pretty awful code, but if you feel 
+// compelled to use it for something, go ahead and modify it as needed.
+// Just make sure you credit me somehow.
+
+// ====================================================================
+// CONSTANTS
+// Wherein I tried to be clever and at some point decided, screw it,
+// I'll just make big hard-coded arrays.
+// ====================================================================
+
+// Constants for input validation.
+var kDisplayOnly = "a";
+var kZakuBracket = "b";
+var kFanVote = "c";
+
+// Constants which describe boundaries on the bracket itself.
+var kNumTeams = 64;
+var kNumMatches = 63;
+var kNumFirstRoundMatches = kNumTeams / 2;
+var kNumRegions = 4;
+var kFirstRoundPerRegion = kNumFirstRoundMatches / kNumRegions;
+
+// There are six rounds of play, and each correct pick is worth a different
+// amount of points per round.
+// R1: 1, R2: 2, Sw16: 3, QF: 4, SF: 6, FINAL: 10
+var kPointsPerMatch = [
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+  3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 6, 6, 10
+];
+
+// Constants to describe a team's current status in the field.
+var kActive = 1;
+var kEliminated = 2;
+
+// Constants to describe the status of a match prediction.
+var kCorrect = 1;
+var kIncorrect = 2;
+var kUnknown = 3;
+
+// First round seeding pairs, in the expected order for each region.
+var first_round_matchups = [
+  new Pair(1, 16), new Pair(8, 9), new Pair(5, 12), new Pair(4, 13),
+  new Pair(6, 11), new Pair(3, 14), new Pair(7, 10), new Pair(2, 15)
+];
+
+// Quick way to determine what match each winner advances to. For example,
+// advance_to[0] = 32 because the winner of match 0 advances to match 32.
+// The semifinals are a special case: regional matchups are A-D and B-C.
+var advance_to = new Array();
+for (var i = kNumFirstRoundMatches; i < kNumMatches; ++i) {
+  advance_to.push(i);
+  advance_to.push(i);
+}
+advance_to[57] = 61;
+advance_to[59] = 60;
+
+// Quick way to determine what matches opponents advanced from. It's the
+// inverse of advance_to, except it only contains entries for matches 32 and
+// up since those are the only ones with constraints on previous matches.
+var advanced_from = new Array();
+for (var i = 0; i < kNumMatches - 1; i += 2) {
+  advanced_from.push(new Pair(i, i+1));
+}
+advanced_from[60 - kNumFirstRoundMatches] = new Pair(56, 59);
+advanced_from[61 - kNumFirstRoundMatches] = new Pair(57, 58);
+
+// ====================================================================
+// OBJECTS
+// ====================================================================
+
+function Pair(arg1, arg2) {
+  this.first = arg1;
+  this.second = arg2;
+}
+
+function BracketState() {
+  this.selected_winners = new Array();
+  for (var i = 0; i < kNumMatches; ++i) {
+    this.selected_winners.push(-1);
+  }
+
+  this.team_state = new Array();
+  for (var i = 0; i < kNumTeams; ++i) {
+    this.team_state.push(kActive);
+  }
+
+  this.match_state = new Array();
+  for (var i = 0; i < kNumMatches; ++i) {
+    this.match_state.push(kUnknown);
+  }
+
+  this.score = 0;
+  this.max_score = 0;
+}
+
+function FormInputs(params) {
+  // Args for Bracket Picker.
+  this.pick = "";
+
+  // Args for Score Checker.
+  // The default check-vs is the 2014 Fan Vote, since that will work for
+  // URLs which predate the selection box.
+  this.input_bracket = "";
+  this.year = "2014";
+  this.check = kFanVote;
+
+  var components = params.split("&");
+  var var1 = "pick_year=";
+  var var2 = "input_bracket=";
+  var var3 = "check_vs=";
+  for (var i = 0; i < components.length; ++i) {
+    var param = components[i];
+    var pos = param.indexOf(var1);
+    if (pos != -1) {
+      this.pick = param.substr(pos + var1.length);
+      continue; 
+    }
+    pos = param.indexOf(var2);
+    if (pos != -1) {
+      this.input_bracket = param.substr(pos + var2.length);
+      continue;
+    }
+    pos = param.indexOf(var3);
+    if (pos != -1) {
+      var check_vs = param.substr(pos + var3.length);
+      if (check_vs.length == 5) {
+        this.year = check_vs.substr(0, 4);
+        this.check = check_vs.substr(4, 1);
+      } else {
+        alert("Unexpected value for 'check_vs': " + check_vs);
+      }
+    }
+  }
+}
+
+function BracketYear(regions, teams, zaku_winners, fan_winners, range) {
+  if (regions.length != kNumRegions) {
+    alert("FATAL wrong number of regions: " + regions.length);
+  }
+  this.regions = regions;
+  
+  if (teams.length != kNumTeams) {
+    alert("FATAL wrong number of teams: " + teams.length);
+  } 
+  this.teams = teams;
+
+  this.zaku_winners = zaku_winners;
+  this.fan_winners = fan_winners;
+  this.range = range;
+}
+
+// ========================================================================
+// GLOBAL VARS
+// ========================================================================
+
+var bracket_years = new Map();
+
+bracket_years.set("2013", new BracketYear(
+    // Regions
+    ["Crocus", "Aincrad", "Umesato", "Kamiyama"],
+    // Teams in S-curve order
+    ["Fairy Tail", "Sword Art Online", "Mirai Nikki", "Hyouka",
+     "My Little Monster", "Accel World", "Chuunibyou", "Fate/Zero S2",
+     "Psycho-Pass", "K", "Kokoro Connect", "Sankarea", "Btooom!",
+     "Pet Girl/Sakurasou", "Blast of Tempest", "Kuroko's Basketball",
+     "Magi: Labyrinth...", "Dusk Maiden/Amnesia", "From the New World",
+     "Say 'I Love You'", "Is This a Zombie?",  "Kids on the Slope",
+     "Hunter x Hunter", "Maoyuu", "Jormungand", "Robotics;Notes",
+     "Haganai", "SKET Dance", "Nyaruko-san", "Code:Breaker",
+     "Little Busters!", "Good Luck Girl!", "Place to Place",
+     "Ambition/Oda Nobuna", "Tsuritama", "Kamisama Kiss",
+     "Asthetica/Rogue Hero", "So I Can't Play H", "Campione!",
+     "Arcana Famiglia", "Problem Children...", "Medaka Box", "Tari Tari",
+     "Tamako Market", "Bakuman 3", "Nekomonogatari: Kuro", "Oreshura",
+     "Mysterious GF X", "Kotoura-san", "Humanity Has Declined",
+     "Love/Elect/Choco", "Amnesia", "Nakaimo", "Zetman", "Phi Brain",
+     "OniAi", "Moeretsu Pirates", "To LOVE-Ru Darkness", "Yuru Yuri",
+     "Eureka Seven AO", "Space Brothers", "Aquarion Evol",
+     "JoJo's Bizarre Adv", "Sasami@Ganbaranai"],
+    // Winning teams according to the Zaku Bracket
+    [0, 31, 16, 15, 23, 8, 24, 7, 1, 33, 17, 14, 22, 54, 25, 6,
+     2, 34, 18, 50, 21, 53, 26, 5, 3, 35, 44, 12, 20, 11, 27, 59,
+     0, 15, 8, 24, 1, 14, 54, 25, 2, 18, 53, 5, 35, 44, 20, 59,
+     15, 8, 1, 25, 18, 5, 44, 59, 8, 25, 18, 44, 8, 18, 8],
+    // Winning teams according to the Fan Vote (n/a in 2013)
+    [],
+    'April 2012 - April 2013'));
+
+bracket_years.set("2014", new BracketYear(
+    // Regions
+    ["Stohess", "Honnouji", "Seirin", "Naoetsu"],
+    // Teams in S-curve order
+    ["Attack on Titan", "Kill la Kill", "Kuroko's Basketball S2",
+     "Monogatari Series S2", "Log Horizon", "Magi: The Kingdom of Magic",
+     "Noragami", "Nagi-Asu: A Lull in the Sea",
+     "The Devil is a Part-Timer!", "The World God Only Knows S3",
+     "Beyond the Boundary", "My Teen RomCom SNAFU", "Space Brothers",
+     "Certain Scientific Railgun S", "Free!", "Golden Time",
+     "High School DxD New", "Chihayafuru 2", "Hajime no Ippo: Rising",
+     "Blood Lad", "Little Busters!: Refrain", "Silver Spoon",
+     "Tokyo Ravens", "Danganronpa", "Gargantia", "Strike the Blood",
+     "OreImo", "Date A Live", "Noucome", "Watamote",
+     "Hentai Prince & Stony Cat", "Non Non Biyori",
+     "Chuunibyou -Heart Throb-", "D-Frag!", "Outbreak Company",
+     "Sunday Without God", "The Eccentric Family", "Servant x Service",
+     "Unbreakable Machine-Doll", "Student Council Staff*",
+     "Kyousou Giga", "Engaged to the Unidentified", "Space Dandy",
+     "White Album 2", "Toriko", "Kingdom S2", "Gatchaman Crowds",
+     "Love Lab", "Arpeggio of Blue Steel", "Witch Craft Works", "Karneval",
+     "Hamatora", "Valvrave the Liberator", "Sakura Trick",
+     "Yozakura Quartet Hana no Uta", "UtaPri: Maji Love 2000%",
+     "Hakkenden S2", "Yu-Sibu: Couldn't be a Hero-", "Nyaruko-san W",
+     "World Conquest Zvezda Plot", "Cool-Headed Hozuki", "Rozen Maiden",
+     "Devil Survivor 2", "Inakon: ABCs of Love"],
+    // Winning teams according to the Zaku Bracket
+    [0, 32, 47, 48, 23, 8, 24, 7, 1, 30, 46, 14, 22, 9, 25, 6,
+     2, 34, 18, 50, 42, 10, 37, 5, 3, 35, 44, 12, 20, 52, 36, 4,
+     0, 48, 23, 24, 1, 14, 9, 6, 2, 18, 42, 5, 35, 12, 52, 4,
+     0, 24, 14, 9, 2, 5, 12, 52, 24, 9, 2, 52, 24, 2, 24],
+    // Winning teams according to the Fan Vote
+    [0, 32, 47, 48, 23, 8, 24, 7, 1, 33, 46, 14, 41, 9, 25, 57,
+     2, 29, 18, 50, 42, 10, 37, 5, 3, 35, 44, 12, 20, 52, 27, 4,
+     0, 48, 23, 24, 1, 14, 9, 25, 2, 18, 42, 5, 3, 12, 52, 4,
+     0, 24, 1, 9, 2, 5, 3, 52, 0, 1, 5, 3, 0, 1, 0],
+    'April 2013 - April 2014'));
+
+bracket_years.set("2015", new BracketYear(
+    // Regions
+    ["Padokea", "Tokyo", "Fuyuki", "Elkia"],
+    // Teams in S-curve order
+    ["Hunter x Hunter", "Parasyte", "Your Lie in April", "No Game No Life",
+     "Death Parade", "Fate/Blade Works", "Terror in Resonance", "Haikyuu",
+     "MG Nozaki-kun", "Barakamon", "7 Deadly Sins", "Akame ga Kill!", 
+     "Sword Art Online II", "Nisekoi", "Durarara!!x2", "Yona of the Dawn",
+     "Irreg at Magic HS", "Shirobako", "Black Butler S3", "Ping Pong",
+     "Blue Spring Ride", "Tokyo Ghoul", "Amagi Brilliant Park", "Psycho-Pass 2",          
+     "Free! S2", "Log Horizon S2", "Kawai Complex Guide", "Ace of Diamond",
+     "Black Bullet", "Bahamut: Genesis", "Stardust Crusaders", "Saekano",                
+     "One Week Friends", "Knights of Sidonia", "Kamisama Kiss S2", "Yowamushi Pedal",        
+     "Space Dandy S2", "Mushi-Shi S2", "Trinity Seven", "Date A Live II",
+     "Love Live! S2", "Fruit of Grisaia", "Gugure! Kokkuri-san", "Inou Battle",            
+     "Chaika", "Wolf Girl & Prince", "I Can't Understand...", "World is Beautiful",
+     "Mekakucity Actors", "Love Stage!!", "My Neighbor Seki", "Baby Steps",
+     "Cloudy Laugh", "Artist & Assistant", "Nanana's Treasure", "Aldnoah.Zero",           
+     "Magic Kaito 1412", "Cross Ange", "Brynhildr", "Marksman & Vanadis",
+     "Maria the Virgin", "Garo/Flame Seal", "Rokujouma", "Blade Dance"],
+    // Winning teams according to the Zaku Bracket
+    [ 0, 31, 47, 15, 23, 8, 24, 7, 1, 33, 17, 14, 22, 54, 25, 6, 
+      61, 34, 18, 13, 21, 10, 37, 5, 3, 35, 19, 51, 43, 11, 27, 4,
+      0, 15, 8, 7, 33, 14, 22, 6, 34, 13, 21, 5, 3, 51, 11, 27,
+      15, 8, 33, 6, 34, 5, 51, 27, 15, 33, 34, 27, 15, 33, 15],
+    // Winning teams according to the Fan Vote
+    [0, 31, 16, 48, 23, 8, 24, 7, 1, 30, 17, 14, 22, 9, 25, 6,
+     2, 29, 18, 50, 21, 10, 37, 5, 3, 35, 19, 12, 43, 11, 36, 4,
+     0, 16, 8, 7, 30, 14, 9, 6, 2, 18, 21, 5, 35, 19, 11, 4,
+     0, 8, 30, 6, 2, 21, 35, 4, 8, 30, 21, 35, 8, 30, 8],
+    'April 2014 - April 2015'));
+
+bracket_years.set("2016", new BracketYear(
+    // Regions
+    ["Z-City", "Tenrou", "Totsuki", "Edo"],
+    // Teams in S-curve order
+    ["One Punch Man", "ERASED", "Shokugeki no Souma", "Gintama", "Haikyuu!! S2",
+     "Noragami Aragoto", "Fairy Tail", "Kuroko's BBall S3", "Fate Unlimited Works S2",
+     "My Teen Love Comedy S2", "Assassination Classroom", "Overlord",
+     "My Love Story!!", "Charlotte", "Prison School", "Dungeon Pick Up Wrong?",
+     "KonoSuba: God's Blessng", "Owarimonogatari", "Grimgar",
+     "Gate: JSDF Fought There", "Showa Gen Rakugo Shinju", "Durarara!!x2",
+     "Blood Blockade Battlefr", "Stardust Crusaders S2", "Seraph of the End",
+     "Plastic Memories", "Chivalry Failed Knight", "Yamada & 7 Witches",
+     "Rokka: Braves of 6...", "Heroic Legend of Arslan", "Gangsta", "God Eater",
+     "Snow White w Red Hair", "Hibike! Euphonium", "World Trigger", "Working!!",
+     "Eden of Grisaia", "Ace of Diamond S2", "Non Non Biyori Repeat",
+     "Shimoseka No Dirty Joke", "Osomatsu-san", "K: Return of Kings",
+     "High School DxD BorN", "School-Live!", "Dimension W", "Ushio and Tora",
+     "MSG Iron Blooded Orph", "Baby Steps S2", "Ajin", "Himouto! Umaru-chan", 
+     "Monster Musume", "Nisekoi:", "Sidonia: Battle for P9", "Prince of Stride",
+     "Gatcha Crowds insight", "Young Black Jack", "Schwarzesmarken", "RIN-NE",
+     "Fafner Dead Aggr S2", "Comet Lucifer", "Active Raid", "Kindaichi Returns S2",
+     "Garo: Crimson Moon", "Aquarion Logos"
+    ],
+    // Winning teams according to the Zaku Bracket (gcekeeecmmbkgone)
+    [0, 32, 47, 15, 23, 55, 24, 7, 1, 30, 46, 14, 22, 54, 25, 57,
+     2, 29, 45, 13, 21, 10, 37, 5, 3, 28, 44, 12, 20, 52, 27, 4,
+     0, 47, 55, 7, 1, 46, 54, 57, 29, 45, 21, 37, 3, 12, 20, 4,
+     0, 7, 46, 54, 29, 37, 12, 4, 7, 46, 37, 4, 7, 46, 46],
+    // Winning teams according to the Fan Vote (caocmecciiikmjec)
+    [0, 32, 16, 15, 23, 8, 24, 7, 1, 33, 46, 49, 22, 54, 25, 6,
+     2, 29, 45, 50, 21, 10, 37, 5, 3, 35, 19, 12, 20, 52, 27, 4,
+     0, 16, 23, 7, 1, 46, 22, 6, 2, 45, 21, 5, 3, 12, 20, 4,
+     0, 23, 46, 6, 45, 21, 3, 4, 0, 46, 21, 3, 0, 21, 0],
+    'April 2015 - April 2016'));
+
+bracket_years.set("2017", new BracketYear(
+    // Regions
+    ["Sendai", "Rakuyo", "Asakusa", "Kunugigaoka"],
+    // Teams in S-curve order
+    ["Haikyuu!! S3", "Gintama.", "ShowaGen Rakugo S2", "Assassin Classroom S2",
+     "Re:Zero", "JJBA: Diamond Unbreak", "Mob Psycho 100", "Natsume Yuujinchou S5",
+     "Shokugeki no Souma S2", "Disastr Life of Saiki K", "KonoSuba: God Bless S2",
+     "My Hero Academia", "Yuri!!! on Ice", "Bungou Stray Dogs", "March in Like a Lion", 
+     "Kobayashi Dragon Maid", "Naruto: Shippuuden", "Hibike! Euphonium S2", "ReLIFE",   
+     "Saga of Tanya the Evil", "Magi: Sinbad Adventure", "MSG: Iron-Blood Orph S2",
+     "Ushio and Tora S2", "Drifters", "Ajin S2",  "Tanaka Always Listless",
+     "91 Days", "Scum's Wish", "Blue Exorcist: Kyoto", "Alderamin on the Sky", 
+     "D.Gray-man Hallow", "Danganronpa 3", "Interview Monster Girls", "Pokemon XY",
+     "Flip Flappers", "New Game!", "You Heard? I'm Sakamoto", "Poco's Udon World",
+     "Orange", "Kiznaiver", "ACCA", "Space Patrol Luluco", "The Great Passage",
+     "Sailor Moon Crystal S3",  "All Out!!", "Onihei", "Legend of Arslan S2",
+     "Tales of Zestiria the X", "MSG: Unicorn RE:0096", "Days", "Flying Witch", 
+     "Kemono Friends", "Berserk", "Joker Game", "Occultic;nine", "RIN-NE S2",
+     "Izetta the Witch", "Cheer Boys!!", "Terra Formars Revenge", "Macross Delta",
+     "Active Raid S2", "Kamakura HS Girl Bike", "Battery", "Scared Rider Xechs"
+    ],
+    // Winning teams according to the Zaku Bracket (ikogegfmkaklemaa)
+    [0, 31, 16, 48, 23, 55, 24, 56, 1, 33, 46, 49, 22, 54, 38, 6,
+     2, 29, 45, 13, 21, 53, 37, 5, 60, 28, 44, 12, 20, 11, 36, 59,
+     0, 48, 23, 56, 1, 46, 22, 38, 2, 13, 21, 5, 28, 12, 20, 59,
+     0, 23, 46, 22, 2, 21, 12, 59, 0, 46, 2, 12, 0, 46, 0],
+    // Winning teams according to the Fan Vote
+    [],
+    'April 2016 - April 2017'));
+
+bracket_years.set("2018", new BracketYear(
+    // Regions
+    ["Musutafu", "Orth", "Trost", "Leiden"],
+    // Teams in S-curve order
+    ["My Hero Academia S2",    //  0: Region A #1
+     "Made in Abyss",          //  1: Region B #1
+     "Attack on Titan S2",     //  2: Region C #1
+     "Violet Evergarden",      //  3: Region D #1
+     "Ancient Magus' Bride",   //  4: Region D #2
+     "Food Wars! Third Plate", //  5: Region C #2
+     "March in Like a Lion S2",//  6: Region B #2
+     "Owarimonogatari S2",     //  7: Region A #2
+     "Place Farther Than Univ",//  8: Region A #3
+     "Land of the Lustrous",   //  9: Region B #3
+     "Overlord S2",            // 10: Region C #3
+     "Tsuki ga Kirei",         // 11: Region D #3
+     "Classroom of the Elite", // 12: Region D #4
+     "Welcome to the Ballroom",// 13: Region C #4
+     "Yuru Camp",              // 14: Region B #4 
+     "Dragon Ball Super",      // 15: Region A #4
+     "Blood Blockade Battlefr",// 16: Region A #5
+     "Inuyashiki",             // 17: Region B #5
+     "Tsurezure Children",     // 18: Region C #5
+     "Little Witch Academia",  // 19: Region D #5
+     "Gintama Slip+SilverSoul",// 20: Region D #6
+     "Natsume Yuujinchou S6",  // 21: Region C #6
+     "Girls' Last Tour",       // 22: Region B #6
+     "Recovery of MMO Junkie", // 23: Region A #6
+     "Kakegurui",              // 24: Region A #7
+     "Re:Creators",            // 25: Region B #7
+     "Skilled Teaser Takagi",  // 26: Region C #7
+     "Blend S",                // 27: Region D #7
+     "WorldEnd",               // 28: Region D #8
+     "New Game!!",             // 29: Region C #8
+     "Saekano:Raise Boring GF",// 30: Region B #8
+     "Pingu in the City",      // 31: Region A #8
+     "Kino's Journey",         // 32: Region A #9
+     "Akashic Records of...",  // 33: Region B #9
+     "Gamers!",                // 34: Region C #9
+     "R of Bahamut: Vrgn Soul",// 35: Region D #9
+     "Sakurada Reset",         // 36: Region D #10
+     "Just Because!",          // 37: Region C #10
+     "Princess Principal",     // 38: Region B #10
+     "After the Rain",         // 39: Region A #10
+     "Fate/Apocryphia",        // 40: Region A #11
+     "Hakata Tonkotsu Ramens", // 41: Region B #11
+     "Knight's & Magic",       // 42: Region C #11
+     "A Sister's All You Need",// 43: Region D #11
+     "Tales of Zesteria X2",   // 44: Region D #12
+     "Yowapeda: New Generatn", // 45: Region C #12
+     "Love and Lies",          // 46: Region B #12
+     "Altair: Record of Battl",// 47: Region A #12
+     "Garo: Vanishing Line",   // 48: Region A #13
+     "Berserk S2",             // 49: Region B #13
+     "Code:Realize",           // 50: Region C #13
+     "Youkai Apartment Life",  // 51: Region D #13
+     "Katsugeki/Touken Ranbu", // 52: Region D #14
+     "Cleanliness Boy! Aoyama",// 53: Region C #14
+     "Zoku Touken Ranbu: Hana",// 54: Region B #14
+     "Koizumi-san Loves Ramen",// 55: Region A #14
+     "Atom: The Beginning",    // 56: Region A #15
+     "RIN-NE S3",              // 57: Region B #15
+     "Tiger Mask W",           // 58: Region C #15
+     "Dive!!",                 // 59: Region D #15
+     "Dame x Prince",          // 60: Region D #16
+     "Kabuki-bu!",             // 61: Region C #16
+     "Sengoku Night Blood",    // 62: Region B #16
+     "Infini-T Force"          // 63: Region A #16
+    ],
+    // Winning teams according to the Zaku Bracket (gkpleljgjciaffgd)
+    [0, 32, 47, 15, 23, 55, 24, 56, 62, 33, 46, 49, 41, 54, 25, 57,
+     2, 29, 45, 13, 42, 53, 26, 58, 60, 28, 19, 51, 20, 52, 36, 4,
+     32, 47, 23, 56, 62, 49, 41, 25, 2, 45, 42, 58, 60, 19, 20, 36,
+     47, 23, 49, 41, 45, 42, 19, 20, 47, 41, 42, 19, 19, 42, 19],
+    // Winning teams according to the Fan Vote
+    [],
+    'April 2017 - April 2018'));
+
+bracket_years.set("2019", new BracketYear(
+    // Regions
+    ["Seasoning City", "Shiganshina", "Demon World", "Shuchiin"],
+    // Teams in S-curve order
+    ["Mob Psycho 100 S2",      //  0: Region A #1
+     "Attack on Titan S3",     //  1: Region B #1
+     "Promised Neverland",     //  2: Region C #1
+     "Kaguya-sama Love is War",//  3: Region D #1
+     "Rascal Doesn't Dream...",//  4: Region D #2
+     "Banana Fish",            //  5: Region C #2
+     "Steins;gate 0",          //  6: Region B #2
+     "My Hero Academia S3",    //  7: Region A #2
+     "Reincarnated as a Slime",//  8: Region A #3
+     "Disaster Life of Saiki2",//  9: Region B #3
+     "Gintama Silver Soul S2", // 10: Region C #3
+     "Grand Blue",             // 11: Region D #3
+     "Run With the Wind",      // 12: Region D #4
+     "Love is Hard for Otaku", // 13: Region C #4
+     "Hinamatsuri",            // 14: Region B #4 
+     "Asobi Asobase",          // 15: Region A #4
+     "Shokugeki no Soma S3",   // 16: Region A #5
+     "Overlord III",           // 17: Region B #5
+     "7 Deadly Sins/Revival",  // 18: Region C #5
+     "Quint. Quintuplets",     // 19: Region D #5
+     "Megalo Box",             // 20: Region D #6
+     "SAO Alicization",        // 21: Region C #6
+     "Golden Kamuy",           // 22: Region B #6
+     "Bloom into You",         // 23: Region A #6
+     "Goblin Slayer",          // 24: Region A #7
+     "Darling in the FranXX",  // 25: Region B #7
+     "Cells at Work",          // 26: Region C #7
+     "High Score Girl",        // 27: Region D #7
+     "Zombieland Saga",        // 28: Region D #8
+     "Irodoku/World in Colors",// 29: Region C #8
+     "Roommate is a Cat",      // 30: Region B #8
+     "Kakegurui",              // 31: Region A #8
+     "Tada-kun Never Falls...",// 32: Region A #9
+     "Cardcaptor Sakura/Clear",// 33: Region B #9
+     "High School DxD Hero",   // 34: Region C #9
+     "Lupin III: Part 5",      // 35: Region D #9
+     "LoGH Die Neue These",    // 36: Region D #10
+     "Tsurune",                // 37: Region C #10
+     "Boarding School Juliet", // 38: Region B #10
+     "B&B for Spirits",        // 39: Region A #10
+     "SAO Alt/Gun Gale Online",// 40: Region A #11
+     "Date A Live III",        // 41: Region B #11
+     "Grancrest War",          // 42: Region C #11
+     "Free! Dive to Future",   // 43: Region D #11
+     "How Not to Summon a...", // 44: Region D #12
+     "FMP! Invisible Victory", // 45: Region C #12
+     "SSSS Gridman",           // 46: Region B #12
+     "Yowamushi P/Glory Road", // 47: Region A #12
+     "SF Bookseller Honda-san",// 48: Region A #13
+     "Morose Mononokean S2",   // 49: Region B #13
+     "Captain Tsubasa",        // 50: Region C #13
+     "Radiant",                // 51: Region D #13
+     "Hanebado!",              // 52: Region D #14
+     "Major 2nd",              // 53: Region C #14
+     "Planet With",            // 54: Region B #14
+     "Basilisk",               // 55: Region A #14
+     "Angolmois",              // 56: Region A #15
+     "Turnabout Trial S2",     // 57: Region B #15
+     "Kyoto Teramachi Holmes", // 58: Region C #15
+     "Nobunaga's Shinobi S2",  // 59: Region D #15
+     "Gundam Build Divers",    // 60: Region D #16
+     "Gurazeni",               // 61: Region C #16
+     "Gakuen Basara",          // 62: Region B #16
+     "Tonegawa Mid Mgmt Blues",// 63: Region A #16
+    ],
+    // Winning teams according to the Zaku Bracket (mmpcfjhoeigcfnnb)
+    [0, 31, 47, 48, 23, 8, 39, 56, 62, 33, 46, 49, 22, 54, 25, 6, 61, 29, 45, 13, 42, 10, 26, 58, 60, 35, 44, 12, 20, 52, 36, 59, 0, 47, 8, 39, 62, 46, 22, 6, 61, 13, 10, 26, 60, 12, 20, 36, 47, 8, 46, 22, 13, 10, 12, 36, 8, 46, 10, 36, 36, 46, 36],
+    // Winning teams according to the Fan Vote
+    [],
+    'April 2018 - April 2019'));
+
+bracket_years.set("2020", new BracketYear(
+    // Regions
+    ["Shiganshina", "Mt. Fujikasane", "Gainsborough", "Napoli"],
+    // Teams in S-curve order
+    ["Attack on Titan S3/P2",  //  0: Region A #1
+     "Demon Slayer",           //  1: Region B #1
+     "Vinland Saga",           //  2: Region C #1
+     "JJBA: Golden Wind",      //  3: Region D #1
+     "Dr. Stone",              //  4: Region D #2
+     "Haikyuu!! To the Top",   //  5: Region C #2
+     "Dororo",                 //  6: Region B #2
+     "Rising of Shield Hero",  //  7: Region A #2
+     "My Hero Academia S4",    //  8: Region A #3
+     "Chihayafuru S3",         //  9: Region B #3
+     "Fruits Basket",          // 10: Region C #3
+     "Bungo Stray Dogs S3",    // 11: Region D #3
+     "Beastars",               // 12: Region D #4
+     "Dorohedoro",             // 13: Region C #4
+     "Given",                  // 14: Region B #4 
+     "Don't Touch Eizouken!",  // 15: Region A #4
+     "Carole & Tuesday",       // 16: Region A #5
+     "Astra: Lost in Space",   // 17: Region B #5
+     "Teasing Master Takagi 2",// 18: Region C #5
+     "Toilet-Bound Hanako-kun",// 19: Region D #5
+     "One Punch Man S2",       // 20: Region D #6
+     "Shokugeki no Souma S4",  // 21: Region C #6
+     "Id:Invaded",             // 22: Region B #6
+     "Fire Force",             // 23: Region A #6
+     "Ascend. of a Bookworm",  // 24: Region A #7
+     "Stop this Sound!",       // 25: Region B #7
+     "Fate/G.O. Babylonia",    // 26: Region C #7
+     "SAO Alice: War Underw",  // 27: Region D #7
+     "Demon School Iruma-kun", // 28: Region D #8
+     "Somali & Forest Spirit", // 29: Region C #8
+     "Ace of Diamond Act II",  // 30: Region B #8
+     "OP Hero is Cautious",    // 31: Region A #8
+     "Psycho-Pass S3",         // 32: Region A #9
+     "High Score Girl S2",     // 33: Region B #9
+     "Bofuri: I Maxed my DEF", // 34: Region C #9
+     "Interspecies Reviewers", // 35: Region D #9
+     "Dungeon Pick-up Wrong?2",// 36: Region D #10
+     "Oresuki?",               // 37: Region C #10
+     "Darwin's Game",          // 38: Region B #10
+     "Fairy Tale: Final",      // 39: Region A #10
+     "Symphogear XV",          // 40: Region A #11
+     "O Maidens in Savage...", // 41: Region B #11
+     "Stars Align",            // 42: Region C #11
+     "Helpful Fox Senko-san",  // 43: Region D #11
+     "Demon Girl Next Door",   // 44: Region D #12
+     "Bocchi Hitori's __ Life",// 45: Region C #12
+     "Smile Down the Runway",  // 46: Region B #12
+     "Radiant S2",             // 47: Region A #12
+     "Lord El-Melloi Case...", // 48: Region A #13
+     "MSG Origin/Red Comet",   // 49: Region B #13
+     "Karakuri Circus",        // 50: Region C #13
+     "GeGeGe no Kitaro",       // 51: Region D #13
+     "Magia Record",           // 52: Region D #14
+     "Kabukicho Sherlock",     // 53: Region C #14
+     "Mix",                    // 54: Region B #14
+     "number24",               // 55: Region A #14
+     "Shinkalion",             // 56: Region A #15
+     "RobiHachi",              // 57: Region B #15
+     "Kochoki: Young Nobunaga",// 58: Region C #15
+     "Oda Cinnamon Nobunaga",  // 59: Region D #15
+     "Bem",                    // 60: Region D #16
+     "New Cooking Master Boy", // 61: Region C #16
+     "After School Dice Club", // 62: Region B #16
+     "Try Knights",            // 63: Region A #16
+    ],
+    // Winning teams according to the Zaku Bracket (hiiiodimlgkofgpe)
+    [63, 32, 47, 15, 23, 8, 24, 56, 1, 30, 17, 49, 22, 9, 25, 57, 2, 34, 45, 50, 42, 53, 26, 5, 3, 28, 19, 51, 20, 11, 36, 59, 32, 15, 23, 56, 1, 49, 9, 25, 2, 50, 42, 5, 3, 51, 11, 59, 15, 23, 49, 9, 2, 5, 51, 11, 23, 9, 5, 11, 23, 9, 9],
+    // Winning teams according to the Fan Vote
+    [],
+    'April 2019 - April 2020'));
+
+bracket_years.set("2021", new BracketYear(
+    // Regions
+    ["Paradis", "Tokyo", "Shuchiin", "Lugnica"],
+    // Teams in S-curve order
+    ["Attack on Titan Final",  //  0: Region A #1
+     "Jujutsu Kaisen",         //  1: Region B #1
+     "Kaguya Love is War S2",  //  2: Region C #1
+     "Re:Zero S2",             //  3: Region D #1
+     "Haikyuu: To the Top S2", //  4: Region D #2
+     "Jobless Reincarnation",  //  5: Region C #2
+     "Reinc as a Slime S2",    //  6: Region B #2
+     "Black Clover",           //  7: Region A #2
+     "My Teen RomCom Snafu",   //  8: Region A #3
+     "Fruits Basket S2",       //  9: Region B #3
+     "Horimiya",               // 10: Region C #3
+     "Dr. Stone: Stone Wars",  // 11: Region D #3
+     "Great Pretender",        // 12: Region D #4
+     "Quint. Quintuplets S2",  // 13: Region C #4
+     "Laid-back Camp S2",      // 14: Region B #4 
+     "SK?",                    // 15: Region A #4
+     "Over the Moon for You",  // 16: Region A #5
+     "Kakushigoto",            // 17: Region B #5
+     "Golden Kamuy S3",        // 18: Region C #5
+     "Wonder Egg Priority",    // 19: Region D #5
+     "Sleepy Princess/Demon",  // 20: Region D #6
+     "Fire Force S2",          // 21: Region C #6
+     "Moriarty the Patriot",   // 22: Region B #6
+     "Non Non Biyori Nonstop", // 23: Region A #6
+     "Beastars S2",            // 24: Region A #7
+     "Tower of God",           // 25: Region B #7
+     "Asc. of a Bookworm S2",  // 26: Region C #7
+     "Certain Sci Railgun T",  // 27: Region D #7
+     "World Trigger S2",       // 28: Region D #8
+     "Akudama Drive",          // 29: Region C #8
+     "Rent-a-Girlfriend",      // 30: Region B #8
+     "SAO Alice: War Underw 2",// 31: Region A #8
+     "Misfit King of Demon Ac",// 32: Region A #9
+     "Dungeon Pick-up Wrong?3",// 33: Region B #9
+     "Millionaire Detective",  // 34: Region C #9
+     "Wandering Witch Elena",  // 35: Region D #9
+     "Next Life as Villainess",// 36: Region D #10
+     "Deca-Dence",             // 37: Region C #10
+     "Kemono Jihen",           // 38: Region B #10
+     "The God of High School", // 39: Region A #10
+     "Bungo Stray Dogs Wan!",  // 40: Region A #11
+     "BNA",                    // 41: Region B #11
+     "Shokugeki no Soma S5",   // 42: Region C #11
+     "Irreg at Magic HS S2",   // 43: Region D #11
+     "Cells at Work Black",    // 44: Region D #12
+     "Is the Order a Rabbit?", // 45: Region C #12
+     "Cells at Work S2",       // 46: Region B #12
+     "Talentless Nana",        // 47: Region A #12
+     "Ahiru no Sora ",         // 48: Region A #13
+     "Appare-Ranman",          // 49: Region B #13
+     "Kuma Kuma Kuma Bear",    // 50: Region C #13
+     "Heaven's Design Team",   // 51: Region D #13
+     "Gynmastics Samurai",     // 52: Region D #14
+     "Ikebukuro W Gate Park",  // 53: Region C #14
+     "Major 2nd S2",           // 54: Region B #14
+     "Yashahime",              // 55: Region A #14
+     "2.43: Seiin Volleyball", // 56: Region A #15
+     "Skate-Leading Stars",    // 57: Region B #15
+     "Gal and Dinosaur",       // 58: Region C #15
+     "Wave! Let's Go Surfing!",// 59: Region D #15
+     "New Cooking Master Boy 2",// 60: Region D #16
+     "Project Scard",          // 61: Region C #16
+     "Tamayomi",               // 62: Region B #16
+     "New Sakura Wars",        // 63: Region A #16
+    ],
+    // Winning teams according to the Zaku Bracket (ppockopgokbllnlf)
+    [63, 32, 47, 48, 40, 55, 39, 56, 1, 33, 46, 49, 22, 54, 25, 6, 2, 34, 18, 50, 21, 53, 37, 58, 60, 35, 44, 51, 20, 52, 36, 4, 63, 48, 55, 56, 1, 49, 22, 6, 34, 18, 21, 37, 35, 51, 20, 4, 48, 56, 1, 6, 18, 21, 51, 4, 56, 6, 18, 4, 4, 6, 6],
+    // Winning teams according to the Fan Vote
+    [],
+    'April 2020 - April 2021'));
+
+bracket_years.set("2022", new BracketYear(
+    // Regions
+    ["Paradis", "Shirone", "Yoshiwara", "Kaibara"],
+    // Teams in S-curve order
+    ["Attack on Titan Final",  //  0: Region A #1
+     "Mushoku Tensei S2",      //  1: Region B #1
+     "Demon Slayer S2",        //  2: Region C #1
+     "My Dress-up Darling",    //  3: Region D #1
+     "Fruits Basket: Final",   //  4: Region D #2
+     "Ousama Ranking",         //  5: Region C #2
+     "Tokyo Revengers",        //  6: Region B #2
+     "To Your Eternity",       //  7: Region A #2
+     "86",                     //  8: Region A #3
+     "Reinc as Slime S2/Pt2",  //  9: Region B #3
+     "Kobayashi Dragon Maid S",// 10: Region C #3
+     "Komi Can't Communicate", // 11: Region D #3
+     "Odd Taxi",               // 12: Region D #4
+     "Vivy: Flourite Eye's...",// 13: Region C #4
+     "Boku no Hero Academia 5",// 14: Region B #4 
+     "Skilled Teaser Takagi 3",// 15: Region A #4
+     "Uramichi Oniisan",       // 16: Region A #5
+     "Vanitas no Karte",       // 17: Region B #5
+     "Demon School Iruma S2",  // 18: Region C #5
+     "Moriarty the Patriot S2",// 19: Region D #5
+     "Nomad: Megalo Box 2",    // 20: Region D #6
+     "Next Life Villainess S2",// 21: Region C #6
+     "Slime Diaries",          // 22: Region B #6
+     "Blue Period",            // 23: Region A #6
+     "Genius Prince's Guide",  // 24: Region A #7
+     "How a Realist Hero...",  // 25: Region B #7
+     "Sonny Boy",              // 26: Region C #7
+     "Dungeon of Black Co.",   // 27: Region D #7
+     "Those Snow White Notes", // 28: Region D #8
+     "Kill Slimes, Max Level", // 29: Region C #8
+     "Kageki Shoujo!!",        // 30: Region B #8
+     "The Faraway Paladin",    // 31: Region A #8
+     "SSSS Dynazenon",         // 32: Region A #9
+     "Backflip!!",             // 33: Region B #9
+     "Re-Main",                // 34: Region C #9
+     "Ryman's Club",           // 35: Region D #9
+     "Kuroitsu/Monster Dev",   // 36: Region D #10
+     "Vampire Dies in No Time",// 37: Region C #10
+     "Burning Kabaddi",        // 38: Region B #10
+     "Magia Record",           // 39: Region A #10
+     "Sakugan",                // 40: Region A #11
+     "Yashahime S2",           // 41: Region B #11
+     "Orient",                 // 42: Region C #11
+     "Platinum End",           // 43: Region D #11
+     "Godzilla Singular Point",// 44: Region D #12
+     "Lupin III: Part 6",      // 45: Region C #12
+     "Jouran/Snow & Blood",    // 46: Region B #12
+     "Dragon House Hunting",   // 47: Region A #12
+     "Let's Make a Mug, Too",  // 48: Region A #13
+     "Back Arrow",             // 49: Region B #13
+     "Tribe Nine",             // 50: Region C #13
+     "AMAIM: Border Warrior",  // 51: Region D #13
+     "Pride of Orange",        // 52: Region D #14
+     "Farewell My Dear Cramer",// 53: Region C #14
+     "Rumble Garandoll",       // 54: Region B #14
+     "Megaton-kyuu Musashi",   // 55: Region A #14
+     "Futsal Boys!!!!!",       // 56: Region A #15
+     "Cestvs: Roman Fighter",  // 57: Region B #15
+     "Shikizakura",            // 58: Region C #15
+     "Getter Robo Arc",        // 59: Region D #15
+     "Muteking: Dancing Hero", // 60: Region D #16
+     "Tesla Note",             // 61: Region C #16
+     "Shinkalion Z",           // 62: Region B #16
+     "Rusted Armors",          // 63: Region A #16
+    ],
+    // Winning teams according to the Zaku Bracket (ljnimopofhebemac)
+    [63, 32, 16, 48, 40, 8, 24, 56, 62, 30, 46, 49, 22, 9, 25, 57, 2, 29, 45, 50, 21, 53, 37, 58, 60, 35, 44, 51, 20, 52, 36, 59, 32, 16, 8, 24, 30, 49, 9, 25, 2, 45, 53, 37, 35, 44, 20, 36, 32, 8, 49, 9, 2, 53, 44, 36, 32, 49, 2, 44, 32, 2, 32],
+    // Winning teams according to the Fan Vote
+    [],
+    'April 2021 - April 2022'));
+
+bracket_years.set("2023", new BracketYear(
+    // Regions
+    ["Shuchiin", "Soul Society", "Berlint", "Shimokitazawa"],
+    // Teams in S-curve order
+    ["Kaguya Ultra Romantic",  //  0: Region A #1
+     "Bleach 1000-Year War",   //  1: Region B #1
+     "Spy x Family",           //  2: Region C #1
+     "Bocchi the Rock!",       //  3: Region D #1
+     "Mob Psycho 100 S3",      //  4: Region D #2
+     "Chainsaw Man",           //  5: Region C #2
+     "Made in Abyss: GoldCity",//  6: Region B #2
+     "Summertime Render",      //  7: Region A #2
+     "Classroom of Elite S2",  //  8: Region A #3
+     "Lycoris Recoil",         //  9: Region B #3
+     "Overlord S4",            // 10: Region C #3
+     "Call of the Night",      // 11: Region D #3
+     "Komi Can't Communic S2", // 12: Region D #4
+     "Ya Boy Kongming!",       // 13: Region C #4
+     "Kingdom S4",             // 14: Region B #4 
+     "Ao Ashi",                // 15: Region A #4
+     "Tomodachi Game",         // 16: Region A #5
+     "Ascend of Bookworm S3",  // 17: Region B #5
+     "Dungeon Pick-up Wrong?4",// 18: Region C #5
+     "Date a Live S4",         // 19: Region D #5
+     "Shadows House S2",       // 20: Region D #6
+     "Yakuza Guide to Babysit",// 21: Region C #6
+     "MSG Witch from Mercury", // 22: Region B #6
+     "More Married/Not Lovers",// 23: Region A #6
+     "Reinc as a Sword",       // 24: Region A #7
+     "Dance Dance Danseur",    // 25: Region B #7
+     "Love After World Dom",   // 26: Region C #7
+     "Aheren-san wa Hakarenai",// 27: Region D #7
+     "Trapped in a Dating Sim",// 28: Region D #8
+     "Akiba Maid War",         // 29: Region C #8
+     "Demon Girl Next Door S2",// 30: Region B #8
+     "Do It Yourself!!",       // 31: Region A #8
+     "Skel Knight/Other World",// 32: Region A #9
+     "Parallel World Pharm",   // 33: Region B #9
+     "Shikimori Not Just Cute",// 34: Region C #9
+     "Uzuki Wants to Play S2", // 35: Region D #9
+     "Deaimon",                // 36: Region D #10
+     "Pokemon Journeys",       // 37: Region C #10
+     "Berserk Golden Age",     // 38: Region B #10
+     "Dragon Quest: Dai's Adv",// 39: Region A #10
+     "Science Fell in Love...",// 40: Region A #11
+     "Raven of Inner Palace",  // 41: Region B #11
+     "I'm Quitting Heroing",   // 42: Region C #11
+     "Villainess Taming Boss", // 43: Region D #11
+     "Dark Summoner",          // 44: Region D #12
+     "Rent-a-Girlfriend S2",   // 45: Region C #12
+     "Birdie Wing",            // 46: Region B #12
+     "Love Live Nijigasaki S2",// 47: Region A #12
+     "Rising Shield Hero S2",  // 48: Region A #13
+     "Shaman King (2021)",     // 49: Region B #13
+     "Fuuto Detective",        // 50: Region C #13
+     "Orient Awajishima",      // 51: Region D #13
+     "My Isekai Life",         // 52: Region D #14
+     "Ittoki the Shinobi",     // 53: Region C #14
+     "My Master Has no Tail",  // 54: Region B #14
+     "Requiem of Rose King",   // 55: Region A #14
+     "Love All Play",          // 56: Region A #15
+     "Don't Hurt Me, Healer",  // 57: Region B #15
+     "Teppen!!!!!!!!!!!",      // 58: Region C #15
+     "Prince of Tennis U17 WC",// 59: Region D #15
+     "AMAIM Borderline S2",    // 60: Region D #16
+     "Bucchigire!",            // 61: Region C #16
+     "Luficer/Biscuit Hammer", // 62: Region B #16
+     "Shoot! Goal to Future",  // 63: Region A #16
+    ],
+    // Winning teams according to the Zaku Bracket (cpookdmkgacohokg)
+    [0, 32, 16, 15, 40, 55, 39, 56, 1, 33, 46, 49, 22, 54, 38, 57, 2, 34, 18, 50, 42, 53, 26, 5, 3, 28, 44, 51, 20, 52, 27, 59, 0, 15, 55, 39, 1, 46, 22, 38, 2, 50, 42, 26, 3, 51, 52, 59, 15, 39, 46, 22, 2, 26, 51, 59, 15, 22, 2, 59, 15, 2, 2],
+    // Winning teams according to the Fan Vote
+    [],
+    'April 2022 - December 2022'));
+
+// The state of the current bracket.
+var state = new BracketState();
+
+// ========================================================================
+// LIBRARY A
+// Functions which can determine indices into the global arrays based on
+// properties such as the current round.
+// ========================================================================
+
+// Get the index of a team in the "teams" array given its region ID and
+// seed.
+function GetTeamIndex(region_id, seed) {
+  if (region_id < 0 || region_id >= kNumRegions) {
+    alert("FATAL: GetOverallRank with bad region " + region_id);
+  }
+  if (seed < 1 || seed > 16) {
+    alert("FATAL: GetOverallRank with bad seed " + seed);
+  }
+
+  // The S-Curve "teams" array should look like this:
+  // Index  Region  Seed
+  //   0      0      1
+  //   1      1      1
+  //   2      2      1
+  //   3      3      1
+  //   4      3      2
+  //   5      2      2
+  //   6      1      2
+  //   7      0      2
+  //   8      0      3
+  // ...
+  //
+  // The idea is that the best 1 seed gets the worst 2 seed in its
+  // bracket, and so on. The idea is to create balance by making the
+  // sums of the overall seeds in each bracket close to equal.
+  if (seed % 2 === 0) {
+    return seed * kNumRegions - region_id - 1;
+  } else {
+    return (seed - 1) * kNumRegions + region_id;
+  }
+}
+
+// Returns the two teams taking part in the match with the given ID as a
+// pair of indices into the "teams" array.
+function GetOpponents(match_id, winner_array) {
+  if (match_id < 0 || match_id >= kNumMatches) {
+    alert("FATAL GetMatchOpponents with bad match " + match_id);
+  }
+
+  // In the first round, matchups come straight from the teams pool. We need
+  // to figure out which region this is and which match it refers to.
+  if (match_id < kNumFirstRoundMatches) {
+    var region = Math.floor(match_id / kFirstRoundPerRegion);
+    var matchup = first_round_matchups[
+      match_id - region * kFirstRoundPerRegion];
+    return new Pair(GetTeamIndex(region, matchup.first),
+                    GetTeamIndex(region, matchup.second));
+  } 
+
+  // Otherwise, the opponents from from previous matches.
+  matches = advanced_from[match_id - kNumFirstRoundMatches];
+  return new Pair(winner_array[matches.first],
+                  winner_array[matches.second]);
+}
+
+// ========================================================================
+// LIBRARY B
+// Formatting tools for displaying items in the table.
+// ========================================================================
+
+// Returns a displayable string for the team in teams[team_index].
+function GetTeamString(team_index, teams) {
+  if (team_index < 0 || team_index >= kNumTeams) {
+    return "-";
+  }
+  //return (Math.floor(team_index / kNumRegions) + 1) + " " + teams[team_index];
+  return teams[team_index];
+}
+
+// Creates a drop-down menu for selecting the winner of a match. Disables
+// any matchup which does not have two valid opponents.
+function SetMatchForm(match_id, year, teams) {
+  var opponents = GetOpponents(match_id, state.selected_winners);
+  var elem = document.getElementById("match" + match_id);
+  
+  // Initialize the select menu based on the validity of the opponents.
+  var select = "<select id=\"select" + match_id + "\" " +
+    "onchange=\"HandleSelection(" + match_id + ", \'" + year + "\')\" ";
+  if (opponents.first === -1 || opponents.second === -1) {
+    select += "disabled>";
+  } else {
+    select += ">";
+  } 
+
+  // Create the options for the select menu.
+  elem.style.backgroundColor = "ffffff";
+  elem.innerHTML = select +
+    "<option value=\"-1\">Match " + (match_id + 1) + "</option>" +
+    "<option value=\"" + opponents.first + "\">" + GetTeamString(
+      opponents.first, teams) + "</option>" +
+    "<option value=\"" + opponents.second + "\">" + GetTeamString(
+      opponents.second, teams) + "</option>" +
+    "</select>";
+}
+
+// Encodes the "selected_winners" array and displays it on the page.
+function EncodeBracket(year) {
+  var encoding = "";
+  // Groups of four matches are encoded by setting a 0 bit if the first
+  // team in the pair is picked and a 1 if it's the second. We use the
+  // first sixteen lower-case alphabet characters, so 'a' is the offset.
+  var current = "a".charCodeAt(0);
+  var unwritten = 0;
+  for (var i = 0; i < state.selected_winners.length; ++i) {
+    if (i > 0 && i % 4 == 0) {
+      // Append a character after every fourth bit.
+      encoding += String.fromCharCode(current);
+      current = "a".charCodeAt(0);
+      unwritten = 0;
+    }
+    var matchup = GetOpponents(i, state.selected_winners);
+    if (state.selected_winners[i] === matchup.second ) {
+      current += (1 << (i % 4));
+    }
+    unwritten++;
+  }
+  if (unwritten > 0) {
+    encoding += String.fromCharCode(current);
+  }
+  var codespan = "<span style=\"font-weight:bold\">" + encoding + "</span>";
+  var link = "http://newtypezaku.github.io/bracket?input_bracket=" +
+    encoding + "&check_vs=" + year + kDisplayOnly;
+  document.getElementById("result").innerHTML = "Your code is: " +
+    codespan + "<br/>View or share your bracket at <a href=\"" +
+    encodeURI(link) + "\">" + link + "</a>";
+}
+
+// Displays the user's bracket selection and also formats each matchup to
+// reflect the selected winner and the correctness of the pick.
+function SetMatchDisplay(match_id, winner, teams) {
+  var opponents = GetOpponents(match_id, state.selected_winners);
+  var elem = document.getElementById("match" + match_id);
+  
+  // Helper function to format the team text.
+  function _GetFormat(team_index) {
+    var text_style = "";
+    if (team_index === state.selected_winners[match_id]) {
+      text_style += "font-weight:bold;";
+    }
+    if (state.match_state[match_id] === kUnknown &&
+        state.team_state[team_index] === kEliminated) {
+      text_style += "color:red";
+    }
+    return text_style;
+  }
+
+  // And the table cell.
+  var bg_style = "";
+  if (state.match_state[match_id] === kCorrect) {
+    bg_style = "B2F49B";
+  } else if (state.match_state[match_id] === kIncorrect) {
+    bg_style = "F4AF9B";
+  } else {
+    bg_style = "FFFFFF";
+  }
+
+  // Write to the table.
+  elem.style.backgroundColor = bg_style;
+  elem.innerHTML = "<span style=\"" + _GetFormat(opponents.first) +
+    "\">" + GetTeamString(opponents.first, teams) +
+    "</span><br/><span style=\"" + _GetFormat(opponents.second) + "\">" +
+    GetTeamString(opponents.second, teams) + "</span>";
+
+  // If the pick is incorrect, print the actual winner in italics.
+  if (state.match_state[match_id] === kIncorrect && winner != -1) {
+    elem.innerHTML += "<br/><span style=\"font-style:italic;\">(" +
+      GetTeamString(winner, teams) + ")</span>";
+  }
+}
+
+function ClearPage() {
+  document.getElementById("instructions_check").style.display = "none";
+  document.getElementById("instructions_pick").style.display = "none";
+  document.getElementById("bracket_form").style.display = "none";
+  document.getElementById("pick_year_form").style.display = "none";
+  document.getElementById("table").style.display = "none";
+  document.getElementById("result").innerHTML = "";
+}
+
+// ========================================================================
+// LIBRARY C
+// Functions to decode and evaluate a bracket.
+// ========================================================================
+
+// Decodes the given bracket to "selected_winners". This does very simple
+// validation: any team which is eliminated may not be picked in a future
+// round. We could also validate that teams only appear in matches where
+// it's possible for them to appear, but we can just let those be scored as
+// wrong picks. Returns non-zero on failure.
+function DecodeBracket(bracket_str) {
+  // We support two different bracket encodings.
+  var version = 0
+  if (bracket_str.length == Math.ceil(kNumMatches / 4)) {
+    version = 2;
+  } else if (bracket_str.length == kNumMatches * 2) {
+    version = 1;
+  } else {
+    if (bracket_str.length > 0) {
+      alert("FATAL bad bracket " + bracket_str + " of length " +
+        bracket_str.length);
+    }
+    return 1;
+  }
+
+  // Constants to describe a team's current status in the field.
+  var local_teams = new Array();
+  for (var i = 0; i < kNumTeams; ++i) {
+    local_teams.push(kActive);
+  }
+  
+  for (var i = 0; i < kNumMatches; ++i) {
+    var matchup = GetOpponents(i, state.selected_winners);
+    var winner = -1;
+    var loser = -1;
+
+    if (version == 1) {
+      // Each match winner is encoded as a two-digit substring which gives
+      // the team index. 
+      winner = parseInt(bracket_str.substring(i * 2, i * 2 + 2), 10);
+      if (winner == matchup.first) {
+        loser = matchup.second;
+      } else {
+        loser = matchup.first;
+      }
+    } else if (version == 2) {
+      // Match winners are encoded as a single bit which states which of the
+      // two advances.
+      var bits = bracket_str.charCodeAt(i / 4) - "a".charCodeAt(0);
+      if (bits & (1 << (i % 4))) {
+        winner = matchup.second;
+        loser = matchup.first;
+      } else {
+        winner = matchup.first;
+        loser = matchup.second;
+      }
+    }
+
+    // Simple validation that winners don't "arise from the grave."
+    if (version == 0 || local_teams[winner] != kActive) {
+      alert("FATAL bad bracket " + bracket_str + " has bad winner " +
+        winner + " for match " + i);
+      for (var j = 0; j < kNumMatches; ++j) {
+        state.selected_winners[j] = -1;
+      }
+      return 1;
+    }
+
+    state.selected_winners[i] = winner;
+    local_teams[loser] = kEliminated;
+  }
+  return 0;
+}
+
+// Scores a given bracket based on the selected winners and the actual
+// winners so far. Returns an object encapsulating the overall state of the
+// bracket.
+function ProcessBracket(bracket_str, winners) {
+  if (0 != DecodeBracket(bracket_str)) {
+    if (bracket_str.length > 0 || winners.length == 0) {
+      return;
+    }
+    // Special case: Display the bracket to compare against.
+    state.selected_winners = winners;
+  }
+
+  // Determine which teams have been eliminated by checking actual results.
+  for (var i = 0; i < winners.length; ++i) { 
+    var matchup = GetOpponents(i, winners);
+    var winner = winners[i];
+    var loser = matchup.first;
+    if (winner === loser) {
+      loser = matchup.second;
+    }
+    state.team_state[loser] = kEliminated;
+  }
+
+  // Score the bracket for the matches which have been played so far.
+  for (var i = 0; i < winners.length; ++i) {
+    if (winners[i] < 0) {
+      state.match_state[i] = kUnknown;
+    } else if (state.selected_winners[i] === winners[i]) {
+      state.match_state[i] = kCorrect;
+      state.score += kPointsPerMatch[i];
+      state.max_score += kPointsPerMatch[i];
+    } else {
+      state.match_state[i] = kIncorrect;
+    }
+  }
+
+  // Add up possible points for the remaining matches.
+  for (var i = winners.length; i < state.selected_winners.length; ++i) {
+    state.match_state[i] = kUnknown;
+    if (state.team_state[state.selected_winners[i]] === kActive) {
+      state.max_score += kPointsPerMatch[i];
+    }
+  }
+}
+
+// ========================================================================
+// LIBRARY D
+// Functions called by form changes in generated code.
+// ========================================================================
+
+function HandleSelection(match_id, year) {
+  // Get the teams list for this year.
+  var bracket_year = bracket_years.get(year);
+  if (bracket_year == undefined) {
+    alert("Selection year " + year + " is invalid!");
+  }
+
+  // Figure out the winner.
+  var select = document.getElementById("select" + match_id);
+  var option = select.options[select.options.selectedIndex];
+  var prev_winner = state.selected_winners[match_id];
+  state.selected_winners[match_id] = parseInt(option.value, 10);
+
+  // If there was previous no winner for this match, we assign it and
+  // propagate the result forward.
+  if (prev_winner === -1) {
+    if (match_id === kNumMatches - 1) {
+      EncodeBracket(year);
+    } else {
+      SetMatchForm(advance_to[match_id], year, bracket_year.teams);
+    }
+    return;
+  }
+
+  // Otherwise we have to invalidate all matches which have a dependency on
+  // this one.
+  var match_iter = advance_to[match_id];
+  while (match_iter != kNumMatches -1) {
+    state.selected_winners[match_iter] = -1;
+    SetMatchForm(match_iter, year, bracket_year.teams);
+    match_iter = advance_to[match_iter];
+  }
+  state.selected_winners[match_iter] = -1;
+  SetMatchForm(match_iter, year, bracket_year.teams);
+  document.getElementById("result").innerHTML = "";
+}
+
+// ========================================================================
+// PUBLIC API
+// Used as actions in main HTML tags.
+// ========================================================================
+
+function InitPicker(year) {
+  ClearPage();
+
+  // Get the teams and regions for this year.
+  var bracket_year = bracket_years.get(year);
+  if (bracket_year == undefined) {
+    alert("Selection year " + year + " is invalid!");
+  }
+  
+  document.getElementById("instructions_pick_year").innerHTML = (
+    "The " + year + " bracket contains TV series ending between " +
+    bracket_year.range + ". ");
+  document.getElementById("instructions_pick").style.display = "inline";
+  var pyform = document.getElementById("pick_year_form");
+  pyform.style.display = "inline";
+  document.getElementById("table").style.display = "inline";
+
+  // Select the picked year by default.
+  var opts = pyform.elements.namedItem("pick_year").options;
+  for (var i = 0; i < opts.length; ++i) {
+    if (opts[i].value == year) {
+      opts[i].selected = true;
+      break;
+    }
+  }
+
+  state = new BracketState();
+  for (var i = 0; i < kNumRegions; ++i) {
+    document.getElementById("region" + i).innerHTML =
+      "<span style=\"font-weight:bold\">" + bracket_year.regions[i] +
+      " Region</span>";
+  }
+  for (var i = 0; i < kNumMatches; ++i) {
+    SetMatchForm(i, year, bracket_year.teams);
+  }
+}
+
+function InitChecker() {
+  ClearPage();
+  document.getElementById("instructions_check").style.display = "inline";
+  document.getElementById("bracket_form").style.display = "inline";
+}
+
+function LoadPage() {
+  // Grab input to determine what view to load.
+  var inputs = new FormInputs(location.search);
+  if (inputs.pick.length == 0 && inputs.input_bracket.length == 0 &&
+      (inputs.check.length == 0 || inputs.check == kDisplayOnly)) {
+    // Allow display of Zaku Bracket or Fan Vote without your own bracket.
+    ClearPage();
+    return;
+  } else if (inputs.pick.length > 0) {
+    InitPicker(inputs.pick);
+    return;
+  } else if (location.search.length == 0) {
+    // Ignore the default args when you load the page.
+    ClearPage();
+    return;
+  }
+
+  // Otherwise, we're trying to verify a bracket.
+  InitChecker();
+  var bracket_year = bracket_years.get(inputs.year);
+  if (bracket_year == undefined) {
+    alert("No bracket for year " + inputs.year);
+    return;
+  }
+  var winners = [];
+  if (inputs.check == kZakuBracket) {
+    winners = bracket_year.zaku_winners;
+  } else if (inputs.check == kFanVote) {
+    winners = bracket_year.fan_winners;
+  }
+
+  // Set form defaults to the supplied arguments.
+  var bform = document.getElementById("bracket_form");
+  bform.elements.namedItem("input_bracket").defaultValue =
+    inputs.input_bracket;
+  var opts = bform.elements.namedItem("check_vs").options;
+  for (var i = 0; i < opts.length; ++i) {
+    if (opts[i].value == (inputs.year + inputs.check)) {
+      opts[i].selected = true;
+      break;
+    }
+  }
+  
+  // Set up the bracket itself.
+  ProcessBracket(inputs.input_bracket, winners);
+  for (var i = 0; i < kNumRegions; ++i) {
+    document.getElementById("region" + i).innerHTML =
+      "<span style=\"font-weight:bold\">" + bracket_year.regions[i] +
+      " Region</span>";
+  }
+  for (var i = 0; i < kNumMatches; ++i) {
+    var winner = (i >= winners.length ? -1 : winners[i]); 
+    SetMatchDisplay(i, winner, bracket_year.teams);
+  }
+
+  // Toggle on all displayable elements for the verification page.
+  document.getElementById("instructions_check").style.display = "inline";
+  bform.style.display = "inline";
+  document.getElementById("table").style.display = "inline";
+  document.getElementById("result").innerHTML = (
+    "Your score is <span style=\"font-weight:bold\">" + state.score +
+    "</span> with a potential score of <span style=\"font-weight:bold\">" +
+    state.max_score + "</span>.");
+}
+
+</script>
+<style>
+
+td {
+  vertical-align: center;
+  border: thin dotted rgb(200,200,200);
+  font-size: small
+}
+
+</style>
+<body onload="LoadPage();">
+
+<!-- These buttons are always present.
+
+They toggle the page between bracket selection and evaluation.
+-->
+
+<p id="intro">
+Welcome to Newtypezaku's Capricious Anime Assessment, a handy way of pitting one set of selection biases against another to determine the best anime of a given year.
+</p>
+
+<p id="buttons">
+<button type="button" onclick="InitPicker('2023');">Bracket Picker</button>
+<button type="button" onclick="InitChecker();">Score Checker</button>
+</p>
+
+<!-- The instructions for filling out the appropriate form.
+
+These are hidden and unhidden based on which button is pressed.
+-->
+
+<p id="instructions_check" style="display:none;">
+To get the current and potential score for your bracket, enter the code that you generated with the Bracket Picker in the text box below and pick a bracket to evaluate it against (or "Display Only" if you just want to see your picks).</p>
+
+<p id="instructions_pick" style="display:none;">
+<span id="instructions_pick_year"></span>
+<span id="instructions_pick_guide">Fill in the table below with your picks for each matchup, after which a series of letters will appear.  Save that so you can use the Score Checker later.  (The bracket defaults to the current year, but you can also fill out any of the previous brackets for funsies.)</span>
+</p>
+
+<!-- Additional form in bracket evaluation mode.
+
+This is where the user enters their numerical bracket code. Like the
+instructions, it is hidden or unhidden depending on the button press.
+-->
+
+<form id="bracket_form" style="display:none;">
+<br/><br/>Enter code: <input type="text" name="input_bracket"/>
+<select name="check_vs">
+  <option value="2023a">2023 Display Only</option>
+  <option value="2023b">2023 Zaku Bracket</option>
+  <option value="2022a">2022 Display Only</option>
+  <option value="2022b">2022 Zaku Bracket</option>
+  <option value="2021a">2021 Display Only</option>
+  <option value="2021b">2021 Zaku Bracket</option>
+  <option value="2020a">2020 Display Only</option>
+  <option value="2020b">2020 Zaku Bracket</option>
+  <option value="2019a">2019 Display Only</option>
+  <option value="2019b">2019 Zaku Bracket</option>
+  <option value="2018a">2018 Display Only</option>
+  <option value="2018b">2018 Zaku Bracket</option>
+  <option value="2017a">2017 Display Only</option>
+  <option value="2017b">2017 Zaku Bracket</option>
+  <option value="2016a">2016 Display Only</option>
+  <option value="2016b">2016 Zaku Bracket</option>
+  <option value="2016c">2016 Fan Vote</option>
+  <option value="2015a">2015 Display Only</option>
+  <option value="2015b">2015 Zaku Bracket</option>
+  <option value="2015c">2015 Fan Vote</option>
+  <option value="2014a">2014 Display Only</option>
+  <option value="2014b">2014 Zaku Bracket</option>
+  <option value="2014c">2014 Fan Vote</option>
+  <option value="2013a">2013 Display Only</option>
+  <option value="2013b">2013 Zaku Bracket</option>
+</select>
+<input type="Submit" value="Check"/>
+</form>
+
+<!-- Additional form in bracket picker mode.
+
+This lets the user pick which year's bracket they want to fill out.
+-->
+
+<form id="pick_year_form" style="display:none;">
+<br/><br/>Pick a year:
+<select name="pick_year">
+  <option value="2023">2023</option>
+  <option value="2022">2022</option>
+  <option value="2021">2021</option>
+  <option value="2020">2020</option>
+  <option value="2019">2019</option>
+  <option value="2018">2018</option>
+  <option value="2017">2017</option>
+  <option value="2016">2016</option>
+  <option value="2015">2015</option>
+  <option value="2014">2014</option>
+  <option value="2013">2013</option>
+</select>
+<input type="Submit" value="Change Year"/>
+</form>
+
+<!-- The table containing the bracket, according to matchups:
+
+M00  M32                         M36  M08
+M01       M48               M50       M09
+M02  M33                         M37  M10
+M03            M56     M57            M11
+M04  M34                         M38  M12
+M05       M49               M51       M13
+M06  M35                         M39  M14
+M07                                   M15
+             M60   M62   M61
+M24  M44                         M40  M16
+M25       M54               M52       M17
+M26  M45                         M41  M18
+M27            M59     M58            M19
+M28  M46                         M42  M20
+M29       M55               M53       M21
+M30  M47                         M43  M22
+M31                                   M23
+
+Depending on the mode, the contents of the table will either be a form
+for selecting match winners or a summary of the correct and incorrect
+picks for each matchup.
+-->
+<p><br /><br /></p>
+<table id="table" style="display: none;">
+<tbody>
+<tr><th colspan="4" id="region0" style="text-align: center;"></th><th colspan="4" id="region1" style="text-align: center;"></th></tr>
+<tr>
+<td id="match0" rowspan="1" style="text-align: left;"></td>
+<td id="match32" rowspan="2" style="text-align: left;"></td>
+<td id="match48" rowspan="4" style="text-align: left;"></td>
+<td id="match56" rowspan="8" style="text-align: left;"></td>
+<td id="match57" rowspan="8" style="text-align: right;"></td>
+<td id="match50" rowspan="4" style="text-align: right;"></td>
+<td id="match36" rowspan="2" style="text-align: right;"></td>
+<td id="match8" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match1" rowspan="1" style="text-align: left;"></td>
+<td id="match9" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match2" rowspan="1" style="text-align: left;"></td>
+<td id="match33" rowspan="2" style="text-align: left;"></td>
+<td id="match37" rowspan="2" style="text-align: right;"></td>
+<td id="match10" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match3" rowspan="1" style="text-align: left;"></td>
+<td id="match11" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match4" rowspan="1" style="text-align: left;"></td>
+<td id="match34" rowspan="2" style="text-align: left;"></td>
+<td id="match49" rowspan="4" style="text-align: left;"></td>
+<td id="match51" rowspan="4" style="text-align: right;"></td>
+<td id="match38" rowspan="2" style="text-align: right;"></td>
+<td id="match12" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match5" rowspan="1" style="text-align: left;"></td>
+<td id="match13" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match6" rowspan="1" style="text-align: left;"></td>
+<td id="match35" rowspan="2" style="text-align: left;"></td>
+<td id="match39" rowspan="2" style="text-align: right;"></td>
+<td id="match14" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match7" rowspan="1" style="text-align: left;"></td>
+<td id="match15" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td colspan="1" id="blank0" style="border: hidden;"></td>
+<td colspan="2" id="match60" style="text-align: center;"></td>
+<td colspan="2" id="match62" style="text-align: center;"></td>
+<td colspan="2" id="match61" style="text-align: center;"></td>
+<td colspan="1" id="blank1" style="border: hidden;"></td>
+</tr>
+<tr>
+<td id="match24" rowspan="1" style="text-align: left;"></td>
+<td id="match44" rowspan="2" style="text-align: left;"></td>
+<td id="match54" rowspan="4" style="text-align: left;"></td>
+<td id="match59" rowspan="8" style="text-align: left;"></td>
+<td id="match58" rowspan="8" style="text-align: right;"></td>
+<td id="match52" rowspan="4" style="text-align: right;"></td>
+<td id="match40" rowspan="2" style="text-align: right;"></td>
+<td id="match16" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match25" rowspan="1" style="text-align: left;"></td>
+<td id="match17" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match26" rowspan="1" style="text-align: left;"></td>
+<td id="match45" rowspan="2" style="text-align: left;"></td>
+<td id="match41" rowspan="2" style="text-align: right;"></td>
+<td id="match18" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match27" rowspan="1" style="text-align: left;"></td>
+<td id="match19" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match28" rowspan="1" style="text-align: left;"></td>
+<td id="match46" rowspan="2" style="text-align: left;"></td>
+<td id="match55" rowspan="4" style="text-align: left;"></td>
+<td id="match53" rowspan="4" style="text-align: right;"></td>
+<td id="match42" rowspan="2" style="text-align: right;"></td>
+<td id="match20" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match29" rowspan="1" style="text-align: left;"></td>
+<td id="match21" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match30" rowspan="1" style="text-align: left;"></td>
+<td id="match47" rowspan="2" style="text-align: left;"></td>
+<td id="match43" rowspan="2" style="text-align: right;"></td>
+<td id="match22" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr>
+<td id="match31" rowspan="1" style="text-align: left;"></td>
+<td id="match23" rowspan="1" style="text-align: right;"></td>
+</tr>
+<tr><th colspan="4" id="region3" style="text-align: center;"></th><th colspan="4" id="region2" style="text-align: center;"></th></tr>
+</tbody>
+</table>
+<!-- The result of the operation goes into the next paragraph.
+
+This will either be the result of bracket selection (the generated code)
+or your current and possible score from bracket evaluation.
+-->
+<p id="result"></p>
+</body>
+</html>
