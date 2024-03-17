@@ -1,11 +1,7 @@
 <html>
 <script type="text/javascript">
 // Javascript library for filling in a 64-team tournament bracket.
-//
-// Written by newtypezaku (newtypezaku.tumblr.com) for my anime bracket, so
-// it's customized for that. It's pretty awful code, but if you feel 
-// compelled to use it for something, go ahead and modify it as needed.
-// Just make sure you credit me somehow.
+// newtypezaku.tumblr.com
 
 // ====================================================================
 // CONSTANTS
@@ -781,6 +777,82 @@ bracket_years.set("2023", new BracketYear(
     [],
     'April 2022 - December 2022'));
 
+bracket_years.set("2024", new BracketYear(
+    // Regions
+    ["Shibuya", "Odaiba", "Jutland", "Swordsmith Village"],
+    // Teams in S-curve order
+    ["Jujutsu Kaisen S2",      //  0: Region A #1
+     "Oshi no Ko",             //  1: Region B #1
+     "Vinland Saga S2",        //  2: Region C #1
+     "KnY Swordsmith Village", //  3: Region D #1
+     "The Eminence in Shadow", //  4: Region D #2
+     "Jobless Reinc S2",       //  5: Region C #2
+     "Blue Lock",              //  6: Region B #2
+     "My Hero Academia S6",    //  7: Region A #2
+     "Bleach 1000 Seperation", //  8: Region A #3
+     "Jigokuraku",             //  9: Region B #3
+     "Spy x Family S2",        // 10: Region C #3
+     "Heavenly Delusion",      // 11: Region D #3
+     "Zom 100",                // 12: Region D #4
+     "Dr. Stone: New World",   // 13: Region C #4
+     "Bungo Stray Dogs S4+S5", // 14: Region B #4 
+     "Horimiya: Piece",        // 15: Region A #4
+     "The Dangers in my Heart",// 16: Region A #5
+     "Loving Yamada at Lv999", // 17: Region B #5
+     "Skip and Loafer",        // 18: Region C #5
+     "Buddy Daddies",          // 19: Region D #5
+     "Mashle",                 // 20: Region D #6
+     "To Your Enternity S2",   // 21: Region C #6
+     "Tomo-chan is a Girl!",   // 22: Region B #6
+     "Uncle from Other World", // 23: Region A #6
+     "NieR:Automata Ver1.1a",  // 24: Region A #7
+     "Dark Gathering",         // 25: Region B #7
+     "Trigun Stampede",        // 26: Region C #7
+     "Tondemo Skill",          // 27: Region D #7
+     "Ancient Magus Bride S2", // 28: Region D #8
+     "Golden Kamuy S4",        // 29: Region C #8
+     "Witch from Mercury S2",  // 30: Region B #8
+     "Masterful Cat Depressed",// 31: Region A #8
+     "Urusei Yatsura",         // 32: Region A #9
+     "Kamonohashi Ron",        // 33: Region B #9
+     "Bofuri S2",              // 34: Region C #9
+     "Handyman Saito",         // 35: Region D #9
+     "Faraway Paladin Rust Mt",// 36: Region D #10
+     "My New Boss is Goofy",   // 37: Region C #10
+     "Tsurune -Linking Shot-", // 38: Region B #10
+     "In Love w/ Villainess",  // 39: Region A #10
+     "Helck",                  // 40: Region A #11
+     "Overtake!",              // 41: Region B #11
+     "The Great Cleric",       // 42: Region C #11
+     "Kuma x3 Bear Punch",     // 43: Region D #11
+     "Edomae Elf",             // 44: Region D #12
+     "Birdie Wing S2",         // 45: Region C #12
+     "Reborn as Vend Machine", // 46: Region B #12
+     "Under Ninja",            // 47: Region A #12
+     "Mononogatari",           // 48: Region A #13
+     "S-Rank Musume",          // 49: Region B #13
+     "Ningen Fushin",          // 50: Region C #13
+     "The Vampire Dies S2",    // 51: Region D #13
+     "Revenger",               // 52: Region D #14
+     "YowaPedal Limit Break",  // 53: Region C #14
+     "A Certain Dude's VRMMO", // 54: Region B #14
+     "Synduality: Noir",       // 55: Region A #14
+     "The Gene of AI",         // 56: Region A #15
+     "Mou Ippon!",             // 57: Region B #15
+     "Girl and Her Guard Dog", // 58: Region C #15
+     "Mix: Meisei Story S2",   // 59: Region D #15
+     "Bullbuster",             // 60: Region D #16
+     "The Marginal Service",   // 61: Region C #16
+     "Megaton-kyuu Musashi S2",// 62: Region B #16
+     "Kawagoe Boys Sing",      // 63: Region A #16
+    ],
+    // Winning teams according to the Zaku Bracket (mkfbmfokcpfcikaa)
+    [0, 31, 47, 48, 23, 55, 24, 56, 62, 30, 46, 14, 41, 9, 25, 6, 2, 29, 45, 50, 42, 10, 37, 5, 3, 35, 44, 51, 20, 52, 27, 59, 0, 48, 23, 24, 30, 14, 9, 6, 29, 45, 10, 37, 3, 51, 20, 27, 0, 23, 30, 6, 29, 37, 3, 27, 0, 30, 29, 3, 0, 30, 0],
+    // Winning teams according to the Fan Vote
+    [],
+    'January 2023 - December 2023'));
+
+
 // The state of the current bracket.
 var state = new BracketState();
 
@@ -854,7 +926,7 @@ function GetOpponents(match_id, winner_array) {
 // Returns a displayable string for the team in teams[team_index].
 function GetTeamString(team_index, teams) {
   if (team_index < 0 || team_index >= kNumTeams) {
-    return "-";
+    return "";
   }
   //return (Math.floor(team_index / kNumRegions) + 1) + " " + teams[team_index];
   return teams[team_index];
@@ -1266,7 +1338,7 @@ Welcome to Newtypezaku's Capricious Anime Assessment, a handy way of pitting one
 </p>
 
 <p id="buttons">
-<button type="button" onclick="InitPicker('2023');">Bracket Picker</button>
+<button type="button" onclick="InitPicker('2024');">Bracket Picker</button>
 <button type="button" onclick="InitChecker();">Score Checker</button>
 </p>
 
@@ -1292,6 +1364,8 @@ instructions, it is hidden or unhidden depending on the button press.
 <form id="bracket_form" style="display:none;">
 <br/><br/>Enter code: <input type="text" name="input_bracket"/>
 <select name="check_vs">
+  <option value="2024a">2024 Display Only</option>
+  <option value="2024b">2024 Zaku Bracket</option>
   <option value="2023a">2023 Display Only</option>
   <option value="2023b">2023 Zaku Bracket</option>
   <option value="2022a">2022 Display Only</option>
@@ -1329,6 +1403,7 @@ This lets the user pick which year's bracket they want to fill out.
 <form id="pick_year_form" style="display:none;">
 <br/><br/>Pick a year:
 <select name="pick_year">
+  <option value="2024">2024</option>
   <option value="2023">2023</option>
   <option value="2022">2022</option>
   <option value="2021">2021</option>
